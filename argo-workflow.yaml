@@ -1,0 +1,101 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: recipe-app-build-
+  namespace: argo
+spec:
+  entrypoint: build-and-push
+  serviceAccountName: argo-workflows-sa
+  podGC:
+    strategy: OnPodCompletion
+  
+  arguments:
+    parameters:
+    - name: ecr-repository
+      value: "YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/recipe-app"
+    - name: git-repo
+      value: "https://github.com/YOUR_USERNAME/recipe-app.git"
+
+  templates:
+  - name: build-and-push
+    steps:
+    - - name: clone
+        template: git-clone
+    - - name: get-sha
+        template: get-commit-sha
+    - - name: build-push
+        template: multiarch-build-push
+        arguments:
+          parameters:
+          - name: commit-sha
+            value: "{{steps.get-sha.outputs.result}}"
+
+  - name: git-clone
+    container:
+      image: alpine/git:latest
+      command: ["git"]
+      args: ["clone", "--depth", "1", "{{workflow.parameters.git-repo}}", "/workspace/repo"]
+    outputs:
+      artifacts:
+      - name: source
+        path: /workspace/repo
+
+  - name: get-commit-sha
+    container:
+      image: alpine/git:latest
+      command: ["sh", "-c"]
+      args:
+        - |
+          cd /workspace/repo
+          git rev-parse --short HEAD > /tmp/sha.txt
+          cat /tmp/sha.txt
+    inputs:
+      artifacts:
+      - name: source
+        path: /workspace/repo
+    outputs:
+      parameters:
+      - name: commit-sha
+        valueFrom:
+          path: /tmp/sha.txt
+
+  - name: multiarch-build-push
+    inputs:
+      artifacts:
+      - name: source
+        path: /workspace/repo
+      parameters:
+      - name: commit-sha
+    container:
+      image: docker:24-dind
+      env:
+      - name: DOCKER_HOST
+        value: "tcp://localhost:2375"
+      - name: AWS_DEFAULT_REGION
+        value: "us-east-1"
+      command: ["sh", "-c"]
+      args:
+        - |
+          cd /workspace/repo
+          
+          # Login to ECR
+          aws ecr get-login-password | docker login --username AWS --password-stdin {{workflow.parameters.ecr-repository}}
+          
+          # Setup buildx
+          docker buildx create --name builder --use --platform linux/amd64,linux/arm64
+          docker buildx inspect --bootstrap
+          
+          # Build and push multi-arch with commit SHA tag
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --tag {{workflow.parameters.ecr-repository}}:{{inputs.parameters.commit-sha}} \
+            --tag {{workflow.parameters.ecr-repository}}:latest \
+            --push \
+            .
+          
+          echo "✅ Pushed: {{workflow.parameters.ecr-repository}}:{{inputs.parameters.commit-sha}}"
+    sidecars:
+    - name: dind
+      image: docker:24-dind
+      securityContext:
+        privileged: true
