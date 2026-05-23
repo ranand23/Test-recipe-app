@@ -5,11 +5,11 @@ FROM --platform=$BUILDPLATFORM node:18-alpine AS builder
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 #RUN npm ci --only=production && npm cache clean --force
 
 # Stage 2: Production image
-FROM --platform=$TARGETPLATFORM node:18-alpine
+FROM node:18-alpine
 
 # Create non-root user
 RUN addgroup -g 1001 -S nodejs && \
